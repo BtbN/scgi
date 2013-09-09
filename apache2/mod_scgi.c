@@ -8,6 +8,7 @@
 #define SCGI_PROTOCOL_VERSION "1"
 
 #include "ap_config.h"
+#include "ap_release.h"
 #include "apr_version.h"
 #include "apr_lib.h"
 #include "apr_strings.h"
@@ -35,6 +36,16 @@
 #define CREATE_SOCKET(sock, family, pool) \
 	    apr_socket_create(sock, family, SOCK_STREAM, APR_PROTO_TCP, pool)
 #endif
+
+#if ( AP_SERVER_MAJORVERSION_NUMBER == 2 && AP_SERVER_MINORVERSION_NUMBER >= 4 ) || AP_SERVER_MAJORVERSION_NUMBER > 2
+#define AP_IS_24 1
+#endif
+
+#ifdef APLOG_USE_MODULE
+APLOG_USE_MODULE(scgi);
+#endif
+
+#define SCGILOG_MARK __FILE__,__LINE__
 
 typedef struct {
     char *path;
@@ -138,13 +149,21 @@ static int scgi_map_location(request_rec *r)
 static void log_err(const char *file, int line, request_rec *r,
                     apr_status_t status, const char *msg)
 {
+#if AP_IS_24
+    ap_log_rerror(file, line, APLOG_MODULE_INDEX, APLOG_ERR, status, r, "scgi: %s", msg);
+#else
     ap_log_rerror(file, line, APLOG_ERR, status, r, "scgi: %s", msg);
+#endif
 }
 
 static void log_debug(const char *file, int line, request_rec *r, const
                       char *msg)
 {
+#if AP_IS_24
+    ap_log_rerror(file, line, APLOG_MODULE_INDEX, APLOG_DEBUG, APR_SUCCESS, r, "%s", msg);
+#else
     ap_log_rerror(file, line, APLOG_DEBUG, APR_SUCCESS, r, msg);
+#endif
 }
 
 static char *http2env(apr_pool_t *p, const char *name)
@@ -312,9 +331,13 @@ send_headers(request_rec *r, struct sockbuff *s)
     int i;
     apr_status_t rv = 0;
     apr_port_t  port = 0;
+#if AP_IS_24
+    GET_PORT(port, r->connection->client_addr);
+#else
     GET_PORT(port, r->connection->remote_addr);
+#endif
 
-    log_debug(APLOG_MARK,r, "sending headers");
+    log_debug(SCGILOG_MARK, r, "sending headers");
     t = apr_table_make(r->pool, 40);
     if (!t)
 	    return APR_ENOMEM;
@@ -324,14 +347,22 @@ send_headers(request_rec *r, struct sockbuff *s)
 	    buf = "0";
     add_header(t, "CONTENT_LENGTH",  buf);
     add_header(t, "SCGI", SCGI_PROTOCOL_VERSION);
+#if AP_IS_24
+    add_header(t, "SERVER_SOFTWARE", ap_get_server_banner());
+#else
     add_header(t, "SERVER_SOFTWARE", ap_get_server_version());
+#endif
     add_header(t, "SERVER_PROTOCOL", r->protocol);
     add_header(t, "SERVER_NAME", ap_get_server_name(r));
     add_header(t, "SERVER_ADMIN", r->server->server_admin);
     add_header(t, "SERVER_ADDR", r->connection->local_ip);
     add_header(t, "SERVER_PORT", apr_psprintf(r->pool, "%u",
                                               ap_get_server_port(r)));
+#if AP_IS_24
+    add_header(t, "REMOTE_ADDR", r->connection->client_ip);
+#else
     add_header(t, "REMOTE_ADDR", r->connection->remote_ip);
+#endif
     add_header(t, "REMOTE_PORT", apr_psprintf(r->pool, "%d", port));
     add_header(t, "REMOTE_USER", r->user);
     add_header(t, "REQUEST_METHOD", r->method);
@@ -443,7 +474,7 @@ open_socket(apr_socket_t **sock, request_rec *r)
                                0,
                                r->pool);
     if (rv) {
-        log_err(APLOG_MARK, r, rv, "apr_sockaddr_info_get() error");
+        log_err(SCGILOG_MARK, r, rv, "apr_sockaddr_info_get() error");
         return rv;
     }
 
@@ -451,13 +482,13 @@ open_socket(apr_socket_t **sock, request_rec *r)
     *sock = NULL;
     rv = CREATE_SOCKET(sock, sockaddr->family, r->pool);
     if (rv) {
-        log_err(APLOG_MARK, r, rv, "apr_socket_create() error");
+        log_err(SCGILOG_MARK, r, rv, "apr_socket_create() error");
         return rv;
     }
 
     rv = apr_socket_timeout_set(*sock, apr_time_from_sec(timeout));
     if (rv) {
-        log_err(APLOG_MARK, r, rv, "apr_socket_timeout_set() error");
+        log_err(SCGILOG_MARK, r, rv, "apr_socket_timeout_set() error");
         return rv;
     }
 
@@ -474,7 +505,7 @@ open_socket(apr_socket_t **sock, request_rec *r)
             sleeptime *= 2;
             goto restart;
         }
-        log_err(APLOG_MARK, r, rv, "scgi: can't connect to server");
+        log_err(SCGILOG_MARK, r, rv, "scgi: can't connect to server");
         return rv;
     }
 
@@ -503,7 +534,7 @@ static int scgi_handler(request_rec *r)
     if (http_status != OK)
         return http_status;
 
-    log_debug(APLOG_MARK, r, "connecting to server");
+    log_debug(SCGILOG_MARK, r, "connecting to server");
 
     rv = open_socket(&sock, r);
     if (rv) {
@@ -514,23 +545,23 @@ static int scgi_handler(request_rec *r)
 
     rv = send_headers(r, &s);
     if (rv) {
-        log_err(APLOG_MARK, r, rv, "error sending request headers");
+        log_err(SCGILOG_MARK, r, rv, "error sending request headers");
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
     rv = send_request_body(r, &s);
     if (rv) {
-        log_err(APLOG_MARK, r, rv, "error sending request body");
+        log_err(SCGILOG_MARK, r, rv, "error sending request body");
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
     rv = bflush(&s);
     if (rv) {
-        log_err(APLOG_MARK, r, rv, "error sending request");
+        log_err(SCGILOG_MARK, r, rv, "error sending request");
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    log_debug(APLOG_MARK, r, "reading response headers");
+    log_debug(SCGILOG_MARK, r, "reading response headers");
     bb = apr_brigade_create(r->connection->pool, r->connection->bucket_alloc);
     b = apr_bucket_socket_create(sock, r->connection->bucket_alloc);
     APR_BRIGADE_INSERT_TAIL(bb, b);
@@ -540,7 +571,7 @@ static int scgi_handler(request_rec *r)
     rv = ap_scan_script_header_err_brigade(r, bb, NULL);
     if (rv) {
         if (rv == HTTP_INTERNAL_SERVER_ERROR) {
-            log_err(APLOG_MARK, r, rv, "error reading response headers");
+            log_err(SCGILOG_MARK, r, rv, "error reading response headers");
         }
         else {
             /* Work around an Apache bug whereby the returned status is
@@ -575,7 +606,7 @@ static int scgi_handler(request_rec *r)
 
     rv = ap_pass_brigade(r->output_filters, bb);
     if (rv) {
-        log_err(APLOG_MARK, r, rv, "ap_pass_brigade()");
+        log_err(SCGILOG_MARK, r, rv, "ap_pass_brigade()");
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
