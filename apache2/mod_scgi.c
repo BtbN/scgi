@@ -47,10 +47,23 @@ APLOG_USE_MODULE(scgi);
 
 #define SCGILOG_MARK __FILE__,__LINE__
 
+#ifndef APR_UNIX
+#if defined(AF_UNIX)
+#define APR_UNIX AF_UNIX
+#elif defined(AF_LOCAL)
+#define APR_UNIX AF_LOCAL
+#else
+#define APR_UNIX 1234
+#endif
+#endif
+
 typedef struct {
     char *path;
+
     char *addr;
     apr_port_t port;
+
+    int local;
 } mount_entry;
 
 /*
@@ -467,12 +480,23 @@ open_socket(apr_socket_t **sock, request_rec *r)
 
     timeout = CONFIG_VALUE(cfg->timeout, CONFIG_VALUE(scfg->timeout,
                                                       DEFAULT_TIMEOUT));
-    rv = apr_sockaddr_info_get(&sockaddr,
-                               CONFIG_VALUE(m->addr, "localhost"),
-                               APR_UNSPEC,
-                               CONFIG_VALUE(m->port, 4000),
-                               0,
-                               r->pool);
+
+    if (m->local) {
+        rv = apr_sockaddr_info_get(&sockaddr,
+                                   m->addr,
+                                   APR_UNIX,
+                                   0,
+                                   0,
+                                   r->pool);
+    } else {
+        rv = apr_sockaddr_info_get(&sockaddr,
+                                   CONFIG_VALUE(m->addr, "localhost"),
+                                   APR_UNSPEC,
+                                   CONFIG_VALUE(m->port, 4000),
+                                   0,
+                                   r->pool);
+    }
+
     if (rv) {
         log_err(SCGILOG_MARK, r, rv, "apr_sockaddr_info_get() error");
         return rv;
@@ -691,6 +715,33 @@ cmd_mount(cmd_parms *cmd, void *dummy, const char *path, const char *addr)
     new->path = apr_pstrndup(cmd->pool, path, n);
     rv = apr_parse_addr_port(&new->addr, &scope_id, &new->port, addr,
                              cmd->pool);
+    new->local = 0;
+
+    if (rv)
+        return "error parsing address:port string";
+    return NULL;
+}
+
+static const char *
+cmd_mount_local(cmd_parms *cmd, void *dummy, const char *path, const char *sock_path)
+{
+    int n;
+    apr_status_t rv;
+    scgi_server_cfg *scfg = our_sconfig(cmd->server);
+    mount_entry *new = apr_array_push(scfg->mounts);
+
+    n = strlen(path);
+    while (n > 0 && path[n-1] == '/') {
+        n--; /* strip trailing slashes */
+    }
+    new->path = apr_pstrndup(cmd->pool, path, n);
+
+    n = strlen(sock_path);
+    new->addr = apr_pstrndup(cmd->pool, sock_path, n);
+    new->port = 0;
+
+    new->local = 1;
+
     if (rv)
         return "error parsing address:port string";
     return NULL;
@@ -753,6 +804,8 @@ static const command_rec scgi_cmds[] =
 {
     AP_INIT_TAKE2("SCGIMount", cmd_mount, NULL, RSRC_CONF,
                   "path prefix and address of SCGI server"),
+    AP_INIT_TAKE2("SCGIMountLocal", cmd_mount_local, NULL, RSRC_CONF,
+                  "path prefix and path of SCGI server unix socket"),
     AP_INIT_TAKE1("SCGIServer", cmd_server, NULL, ACCESS_CONF,
                   "Address and port of an SCGI server (e.g. localhost:4000)"),
     AP_INIT_FLAG( "SCGIHandler", cmd_handler, NULL, ACCESS_CONF,
